@@ -60,9 +60,15 @@ def _resolve_config_file() -> Path:
 app = FastAPI(title="Sellbird Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
 token_store = auth.TokenStore(TOKEN_FILE)
 agent_token_store = auth.TokenStore(AGENT_TOKEN_FILE)
+# Optional SSO edge (Palisade/FPL Auth): requests arriving for this public
+# hostname are authenticated by the proxy, which strips any client-supplied
+# identity headers and sets its own. The local token still works on loopback.
+PUBLIC_HOST = os.getenv("SELLBIRD_PUBLIC_HOST", "").strip().lower()
+TRUST_PROXY_AUTH = os.getenv("SELLBIRD_TRUST_PROXY_AUTH", "").strip().lower() in ("1", "true", "yes")
 # Innermost first: the guard (added next) sets the principal before this runs.
 app.add_middleware(agent_policy.AgentPolicy)
-app.add_middleware(auth.DashboardGuard, store=token_store, agent_store=agent_token_store)
+app.add_middleware(auth.DashboardGuard, store=token_store, agent_store=agent_token_store,
+                   public_host=PUBLIC_HOST, trust_proxy_auth=TRUST_PROXY_AUTH)
 
 
 class home_middleware:

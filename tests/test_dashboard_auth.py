@@ -25,6 +25,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.middleware import Middleware
 from starlette.routing import Route
 
 import sellbird.dashboard as dash
@@ -829,7 +830,7 @@ def test_fragment_token_moves_to_session_storage_and_leaves_the_url():
     assert out["call"]["auth"] == f"Bearer {token}"
     assert out["call"]["url"] == "http://127.0.0.1:5555/api/companies"
     assert out["call"]["ctype"] == "application/json"
-    assert out["call"]["mode"] == "same-origin" and out["call"]["credentials"] == "omit"
+    assert out["call"]["mode"] == "same-origin" and out["call"]["credentials"] == "same-origin"
     assert out["call"]["redirect"] == "error" and out["call"]["referrerPolicy"] == "same-origin"
 
 
@@ -863,6 +864,21 @@ def test_collected_links_cannot_run_script_in_the_dashboard():
                                     check=True, timeout=30).stdout)
     assert out == ["https://ok.example/a?b=1&amp;c=2", "", "", "", "", ""]
     assert 'href="\' + escHtml(' not in src
+
+
+def test_proxy_auth_accepts_only_vouch_identity_for_the_public_host(env):
+    guard = Middleware(auth.DashboardGuard, store=dash.token_store,
+                       public_host="sellbird.fpl.dev", trust_proxy_auth=True)
+    with TestClient(dash.build_app(guard=guard), base_url="https://sellbird.fpl.dev") as c:
+        assert c.get("/").status_code == 200
+        assert c.get("/api/companies").status_code == 401
+        assert c.get("/api/companies", headers={"X-FPL-Auth-Method": "basic",
+                                                  "X-FPL-User-Email": "a@fpl.dev"}).status_code == 401
+        ok = {"X-FPL-Auth-Method": "vouch", "X-FPL-User-Email": "a@fpl.dev"}
+        assert c.get("/api/companies", headers=ok).status_code == 200
+        cross = {**ok, "Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"}
+        assert c.get("/api/companies", headers=cross).status_code == 403
+        assert c.get("/api/companies", headers={**ok, "Host": "evil.example"}).status_code == 400
 
 
 def test_app_js_only_talks_to_the_api_through_authfetch():
