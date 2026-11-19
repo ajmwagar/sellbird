@@ -63,6 +63,9 @@ agent_token_store = auth.TokenStore(AGENT_TOKEN_FILE)
 # Optional SSO edge (Palisade/FPL Auth): requests arriving for this public
 # hostname are authenticated by the proxy, which strips any client-supplied
 # identity headers and sets its own. The local token still works on loopback.
+# Load .env here (not only when a request writes settings) so these are set
+# before the middleware is built; real process env still wins.
+load_dotenv(str(ENV_FILE), override=False)
 PUBLIC_HOST = os.getenv("SELLBIRD_PUBLIC_HOST", "").strip().lower()
 TRUST_PROXY_AUTH = os.getenv("SELLBIRD_TRUST_PROXY_AUTH", "").strip().lower() in ("1", "true", "yes")
 # Innermost first: the guard (added next) sets the principal before this runs.
