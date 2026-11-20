@@ -333,12 +333,15 @@ class DashboardGuard:
     request, and the security headers to every response."""
 
     def __init__(self, app, store: TokenStore, agent_store: TokenStore | None = None,
-                 public_host: str = "", trust_proxy_auth: bool = False):
+                 public_host: str = "", trust_proxy_auth: bool = False,
+                 api_key: str = "", api_host: str = ""):
         self.app = app
         self.store = store
         self.agent_store = agent_store
         self.public_host = (public_host or "").strip().lower()
         self.trust_proxy_auth = bool(trust_proxy_auth and self.public_host)
+        self.api_key = (api_key or "").strip()
+        self.api_host = (api_host or "").strip().lower()
 
     def _same_tokens_message(self) -> str:
         return (f"The agent token ({self.agent_store.path}) is the same as the dashboard "
@@ -382,7 +385,8 @@ class DashboardGuard:
         host = parse_host(hosts[0]) if len(hosts) == 1 else None
         local = host is not None and is_loopback(host)
         proxied = bool(self.trust_proxy_auth and host == self.public_host)
-        if not (local or proxied):
+        api_host = bool(self.api_key and self.api_host and host == self.api_host)
+        if not (local or proxied or api_host):
             return await deny(400, "bad_host",
                               "This dashboard only answers to localhost / 127.0.0.1"
                               + (f" or {self.public_host} with SSO." if self.trust_proxy_auth else "."))
@@ -401,6 +405,20 @@ class DashboardGuard:
         site = headers.get("sec-fetch-site", [])
         if site and site[0].lower() not in ("same-origin", "none") and not navigation:
             return await deny(403, "cross_origin", "Cross-site requests are refused.")
+
+        # Remote CLI/API: an API key on /remote-api/** bypasses the SSO edge
+        # and is rewritten to the matching /api/** route. Keep this prefix out
+        # of the browser UI path so Vouch still protects the dashboard.
+        remote_prefix = "/remote-api"
+        if path == remote_prefix or path.startswith(remote_prefix + "/"):
+            authorization = headers.get("authorization", [])
+            if not self.api_key or not bearer_ok(authorization, self.api_key):
+                return await deny(401, "unauthorized", "A valid Sellbird API key is required.",
+                                  extra=[(b"www-authenticate", b'Bearer realm="sellbird-api"')])
+            scope["path"] = "/api/remote" + path[len(remote_prefix):]
+            scope["raw_path"] = scope["path"].encode()
+            scope.setdefault("state", {})["principal"] = "api"
+            return await self._check_mutation(method, headers, scope, receive, send, deny, send_secured)
 
         if public:
             return await self.app(scope, receive, send_secured)

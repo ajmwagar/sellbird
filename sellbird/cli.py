@@ -211,6 +211,12 @@ def cmd_dashboard(args):
         sys.exit(2)
 
 
+def cmd_remote(args):
+    """Run a command against a hosted Sellbird over HTTPS."""
+    from sellbird import remote_cli
+    sys.exit(remote_cli.run(getattr(args, "remote_args", []) or []))
+
+
 def cmd_status(args):
     """Show current pipeline status."""
     from sellbird.state import StateManager
@@ -1119,6 +1125,13 @@ def cmd_suppressions(args):
 def main():
     from sellbird.textio import utf8_stdio
     utf8_stdio()
+    # A configured hosted install is the default for read/control commands;
+    # SELLBIRD_LOCAL=1 forces the on-disk checkout and SQLite database.
+    from sellbird import remote_cli
+    if remote_cli.should_auto_remote(sys.argv[1:]):
+        sys.exit(remote_cli.run(sys.argv[1:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "remote":
+        sys.exit(remote_cli.run(sys.argv[2:]))
     from sellbird.paths import PROJECT_ROOT
     project_root = str(PROJECT_ROOT)
 
@@ -1170,6 +1183,13 @@ def main():
     sub.add_argument("--url", action="store_true",
                      help="Print the unlock link (with its token) and exit")
     sub.set_defaults(func=cmd_dashboard)
+
+    # sellbird remote <command> [args]
+    sub = subparsers.add_parser(
+        "remote", help="Run a command against a hosted Sellbird (API key + HTTPS)")
+    sub.add_argument("remote_args", nargs=argparse.REMAINDER,
+                     help="Command and arguments, e.g. status, outbox, companies")
+    sub.set_defaults(func=cmd_remote)
 
     # sellbird status
     sub = subparsers.add_parser("status", help="Show pipeline status")
