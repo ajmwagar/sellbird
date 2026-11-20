@@ -41,6 +41,11 @@ the folder grants, and Sellbird doesn't pretend otherwise (see docs/dashboard.md
 
 This does not protect against code already running as the same OS user,
 which can read the token file (or the database) directly.
+
+When ``public_host`` and ``trust_proxy_auth`` are set, the guard also accepts
+requests for that one hostname carrying a trusted proxy identity
+(``x-fpl-auth-method: vouch`` plus ``x-fpl-user-email``). The proxy must strip
+client-supplied copies of those headers; loopback keeps the token path.
 """
 
 from __future__ import annotations
@@ -327,10 +332,13 @@ class DashboardGuard:
     """ASGI middleware applying the checks in the module docstring to every
     request, and the security headers to every response."""
 
-    def __init__(self, app, store: TokenStore, agent_store: TokenStore | None = None):
+    def __init__(self, app, store: TokenStore, agent_store: TokenStore | None = None,
+                 public_host: str = "", trust_proxy_auth: bool = False):
         self.app = app
         self.store = store
         self.agent_store = agent_store
+        self.public_host = (public_host or "").strip().lower()
+        self.trust_proxy_auth = bool(trust_proxy_auth and self.public_host)
 
     def _same_tokens_message(self) -> str:
         return (f"The agent token ({self.agent_store.path}) is the same as the dashboard "
@@ -367,13 +375,19 @@ class DashboardGuard:
         method = scope.get("method", "GET").upper()
         path = scope.get("path", "")
 
-        # 1. Host, before anything else.
+        # 1. Host, before anything else. A local dashboard answers only to
+        # loopback. A proxy-fronted dashboard also answers to exactly one
+        # configured public hostname, and only with proxy authentication.
         hosts = headers.get("host", [])
         host = parse_host(hosts[0]) if len(hosts) == 1 else None
-        if host is None or not is_loopback(host):
+        local = host is not None and is_loopback(host)
+        proxied = bool(self.trust_proxy_auth and host == self.public_host)
+        if not (local or proxied):
             return await deny(400, "bad_host",
-                              "This dashboard only answers to localhost / 127.0.0.1.")
+                              "This dashboard only answers to localhost / 127.0.0.1"
+                              + (f" or {self.public_host} with SSO." if self.trust_proxy_auth else "."))
         host_header = hosts[0].lower()
+        expected_origin = f"{'http' if local else 'https'}://{host_header}"
 
         # 2. Browser provenance.
         public = is_public_path(method, path)
@@ -381,7 +395,7 @@ class DashboardGuard:
                       and headers.get("sec-fetch-mode", [""])[0] == "navigate"
                       and headers.get("sec-fetch-dest", [""])[0] == "document")
         origins = headers.get("origin", [])
-        if origins and (len(origins) != 1 or origins[0].lower() != f"http://{host_header}"):
+        if origins and (len(origins) != 1 or origins[0].lower() != expected_origin):
             if not navigation:
                 return await deny(403, "cross_origin", "Cross-origin requests are refused.")
         site = headers.get("sec-fetch-site", [])
@@ -390,6 +404,22 @@ class DashboardGuard:
 
         if public:
             return await self.app(scope, receive, send_secured)
+
+        # 2b. Proxy-authenticated request. Palisade's Vouch mode strips any
+        # inbound identity headers and sets these after checking the session
+        # with FPL Auth, so an unauthenticated caller cannot forge them.
+        if proxied:
+            methods = headers.get("x-fpl-auth-method", [])
+            emails = headers.get("x-fpl-user-email", [])
+            email = emails[0].strip() if len(emails) == 1 else ""
+            if (len(methods) != 1 or methods[0].strip().lower() != "vouch"
+                    or not email or "@" not in email or len(email) > 254
+                    or any(ord(c) < 33 or ord(c) >= 127 for c in email)):
+                return await deny(401, "unauthorized",
+                                  "Sign in through FPL SSO to use this dashboard.",
+                                  extra=[(b"www-authenticate", b'Bearer realm="sellbird"')])
+            scope.setdefault("state", {})["principal"] = email.lower()
+            return await self._check_mutation(method, headers, scope, receive, send, deny, send_secured)
 
         # 3. Token (fail closed when it can't be loaded). The user's token is
         # checked first, so the UI never loads (or creates) the agent's.
@@ -428,11 +458,13 @@ class DashboardGuard:
         scope.setdefault("state", {})["principal"] = principal
 
         # 4. Mutations carry JSON or nothing.
+        return await self._check_mutation(method, headers, scope, receive, send, deny, send_secured)
+
+    async def _check_mutation(self, method, headers, scope, receive, send, deny, send_secured):
         if method in _UNSAFE_METHODS:
             length = headers.get("content-length", ["0"])[0].strip()
             has_body = bool(headers.get("transfer-encoding")) or length not in ("", "0")
             if has_body and not _is_json(headers.get("content-type", [""])[0]):
                 return await deny(415, "unsupported_media_type",
                                   "Request bodies must be application/json.")
-
         return await self.app(scope, receive, send_secured)

@@ -63,7 +63,9 @@ function authFetch(path, opts) {
   if (token) headers.set('Authorization', 'Bearer ' + token);
   o.headers = headers;
   o.mode = 'same-origin';
-  o.credentials = 'omit';
+  // Same-origin cookies carry the SSO session when the dashboard sits behind
+  // Palisade/FPL Auth. The token, when present, is still only a header.
+  o.credentials = 'same-origin';
   o.cache = 'no-store';
   o.redirect = 'error';
   // Not 'no-referrer': per the Fetch spec that makes a POST's Origin "null"

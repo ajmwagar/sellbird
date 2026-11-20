@@ -12,6 +12,8 @@ sellbird dashboard     # prints the link to open, e.g. http://127.0.0.1:5555/#to
 
 **Windows:** the token file is protected by the permissions of the folder it lives in (your user profile normally restricts this to you); Sellbird doesn't apply POSIX file modes there.
 
+**Optional SSO edge.** Behind an authenticating proxy that terminates a team login, set `SELLBIRD_PUBLIC_HOST` to the exact public hostname and `SELLBIRD_TRUST_PROXY_AUTH=1`. Requests for that host are accepted only when the proxy supplies `x-fpl-auth-method: vouch` and a non-empty `x-fpl-user-email`; the proxy must strip those headers from client requests first (Palisade's Vouch mode does). Loopback keeps the token path, so local recovery still works. This is not a replacement for the token on a directly exposed port.
+
 Plain HTML, CSS and JavaScript served from `sellbird/web/`. No build step, no framework, no bundler — edit `app.css` and reload. Fonts are vendored, so it renders correctly with the network off.
 
 <picture>
