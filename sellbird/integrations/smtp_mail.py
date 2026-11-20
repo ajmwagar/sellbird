@@ -94,7 +94,9 @@ class SmtpImapProvider(MailProvider):
         self.imap_pass = getattr(env, "imap_password", "") or self.smtp_pass
 
     def is_configured(self) -> bool:
-        return bool(self.smtp_host and self.smtp_user and self.smtp_pass)
+        # A Gmail SMTP relay can authorize by source IP, with no password.
+        # IMAP remains optional until a mailbox credential is supplied.
+        return bool(self.smtp_host and (self.smtp_user or self.smtp_pass))
 
     async def send_email(
         self,
@@ -124,16 +126,17 @@ class SmtpImapProvider(MailProvider):
         set_body(msg, body, sig)
 
         try:
-            await aiosmtplib.send(
-                msg,
-                hostname=self.smtp_host,
-                port=self.smtp_port,
-                username=self.smtp_user,
-                password=self.smtp_pass,
-                start_tls=(self.smtp_port == 587),
-                use_tls=(self.smtp_port == 465),
-                timeout=30,
-            )
+            send_kwargs = {
+                "hostname": self.smtp_host,
+                "port": self.smtp_port,
+                "start_tls": self.smtp_port == 587,
+                "use_tls": self.smtp_port == 465,
+                "timeout": 30,
+            }
+            if self.smtp_user and self.smtp_pass:
+                send_kwargs["username"] = self.smtp_user
+                send_kwargs["password"] = self.smtp_pass
+            await aiosmtplib.send(msg, **send_kwargs)
         except Exception as e:
             logger.error(f"SMTP send failed to {to_email}: {e}")
             return SendResult(ok=False, error=str(e)[:300],
@@ -141,6 +144,8 @@ class SmtpImapProvider(MailProvider):
         return SendResult(ok=True, message_id=message_id, thread_ref=message_id)
 
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
+        if not self.imap_pass:
+            return []
         loop = asyncio.get_event_loop()
         try:
             return await loop.run_in_executor(None, self._fetch_unseen, limit)
@@ -221,10 +226,13 @@ class SmtpImapProvider(MailProvider):
                 use_tls=(self.smtp_port == 465), timeout=15,
             )
             await smtp.connect()
-            await smtp.login(self.smtp_user, self.smtp_pass)
+            if self.smtp_user and self.smtp_pass:
+                await smtp.login(self.smtp_user, self.smtp_pass)
             await smtp.quit()
         except Exception as e:
-            return False, f"SMTP login failed: {str(e)[:200]}"
+            return False, f"SMTP connection failed: {str(e)[:200]}"
+        if not self.imap_pass:
+            return True, f"SMTP relay connected as {self.smtp_user} (no auth); IMAP not configured, replies are not read"
         # IMAP handshake
         loop = asyncio.get_event_loop()
 

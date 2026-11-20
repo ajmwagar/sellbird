@@ -68,10 +68,13 @@ agent_token_store = auth.TokenStore(AGENT_TOKEN_FILE)
 load_dotenv(str(ENV_FILE), override=False)
 PUBLIC_HOST = os.getenv("SELLBIRD_PUBLIC_HOST", "").strip().lower()
 TRUST_PROXY_AUTH = os.getenv("SELLBIRD_TRUST_PROXY_AUTH", "").strip().lower() in ("1", "true", "yes")
+API_KEY = os.getenv("SELLBIRD_API_KEY", "").strip()
+API_HOST = os.getenv("SELLBIRD_API_HOST", "").strip().lower()
 # Innermost first: the guard (added next) sets the principal before this runs.
 app.add_middleware(agent_policy.AgentPolicy)
 app.add_middleware(auth.DashboardGuard, store=token_store, agent_store=agent_token_store,
-                   public_host=PUBLIC_HOST, trust_proxy_auth=TRUST_PROXY_AUTH)
+                   public_host=PUBLIC_HOST, trust_proxy_auth=TRUST_PROXY_AUTH,
+                   api_key=API_KEY, api_host=API_HOST)
 
 
 class home_middleware:
@@ -2954,6 +2957,49 @@ INSTANCE_ID = uuid.uuid4().hex
 @app.get("/api/instance")
 async def get_instance():
     return {"instance": INSTANCE_ID}
+
+
+# Remote CLI (API key): runs an allowlisted read/control command in a child
+# process, with the hosted install's own config, database and credentials.
+_REMOTE_COMMANDS = {"status", "companies", "outbox", "usage", "warmup", "runs"}
+
+
+@app.post("/api/remote/cli")
+async def remote_cli(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    argv = payload.get("argv") if isinstance(payload, dict) else None
+    if (not isinstance(argv, list) or not argv
+            or not all(isinstance(x, str) and len(x) <= 200 for x in argv)
+            or len(argv) > 16):
+        return JSONResponse({"ok": False, "error": "argv must be a short list of strings"}, status_code=400)
+    first = argv[0]
+    allowed = first in _REMOTE_COMMANDS
+    if first == "inboxes":
+        allowed = len(argv) == 2 and argv[1] == "list"
+    elif first == "sending":
+        allowed = len(argv) == 2 and argv[1] in {"pause", "resume", "status"}
+    if not allowed:
+        return JSONResponse({"ok": False, "error": f"command not available remotely: {' '.join(argv[:2])}"},
+                            status_code=403)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "sellbird", *argv,
+            cwd=str(PROJECT_ROOT), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env=os.environ.copy())
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
+        return {"ok": proc.returncode == 0, "exit_code": proc.returncode,
+                "stdout": out.decode("utf-8", "replace"),
+                "stderr": err.decode("utf-8", "replace")}
+    except asyncio.TimeoutError:
+        if proc is not None:
+            proc.kill()
+        return {"ok": False, "error": "remote command timed out after 180s"}, 504
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}, 500
 
 
 from sellbird.inbox_routes import router as _inbox_router  # noqa: E402
