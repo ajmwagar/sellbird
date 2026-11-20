@@ -477,7 +477,10 @@ async def connect_smtp_mailbox(store: MailboxStore, secrets: SecretStore, config
     if not settings.host:
         raise ConnectRefused("Give the SMTP server's host name.")
     ref = smtp_ref(mailbox_id)
-    secrets.set(ref, settings.password)
+    # Gmail SMTP relay can authorize by source IP; an empty password is a
+    # valid send-only inbox, and there is no secret to put in a keychain.
+    if settings.password:
+        secrets.set(ref, settings.password)
     return await _insert(store, mailbox_id=mailbox_id, address=addr, provider="smtp",
                          connection="smtp", display_name=display_name, credential_ref=ref,
                          settings=settings.public(), warmup_started_at=warmup)
